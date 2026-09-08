@@ -105,7 +105,7 @@
   .btn:disabled{opacity:.4;cursor:not-allowed;}
 
   .kpis{
-    display:grid;grid-template-columns:repeat(8,1fr);gap:14px;margin-bottom:28px;
+    display:grid;grid-template-columns:repeat(9,1fr);gap:14px;margin-bottom:28px;
   }
   .kpi{
     background:var(--panel);
@@ -152,11 +152,13 @@
   .alert-track{position:relative;background:var(--panel-2);border-radius:5px;height:16px;overflow:visible;}
   .alert-fill{height:100%;border-radius:5px;background:var(--red);min-width:2px;}
   .alert-fill.warn{background:var(--amber);}
+  .alert-fill.covered{background:var(--teal);}
   .alert-target-mark{position:absolute;top:-4px;bottom:-4px;width:2px;background:#0F172A;}
   .alert-target-mark::after{content:'META';position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:8px;letter-spacing:.03em;color:var(--muted);font-family:'IBM Plex Mono',monospace;white-space:nowrap;}
   .alert-need{text-align:right;font-family:'IBM Plex Mono',monospace;}
   .alert-need .n{font-size:15px;font-weight:700;color:var(--red);}
   .alert-need.warn .n{color:var(--amber);}
+  .alert-need.covered .n{color:var(--teal);}
   .alert-need .lbl{font-size:10.5px;color:var(--muted);margin-top:2px;}
   @media(max-width:640px){.alert-item{grid-template-columns:1fr;gap:8px;}.alert-need{text-align:left;}}
   @media(max-width:640px){table{font-size:10.5px;} thead th, tbody td{padding:5px 3px;} .bar-row{grid-template-columns:74px 1fr 34px;}}
@@ -390,7 +392,7 @@
       else if (r.estado === 'SIN FACILIDADES TECNICAS' || r.estado === 'SIN FACILIDADES TÉCNICAS') g.sinFftt++;
     });
     return [...map.values()].map(g => {
-      const pendiente = g.asignados - g.finalizado - g.cancelado - g.reprograma - g.rescate - g.ausente - g.sinFftt;
+      const pendiente = g.asignados - g.finalizado - g.cancelado - g.reprograma - g.enProceso - g.rescate - g.ausente - g.sinFftt;
       const efectividad = g.asignados ? g.finalizado / g.asignados : 0;
       const productividad = g.asignados ? (g.finalizado + g.cancelado + g.reprograma) / g.asignados : 0;
       const pctCancel = g.asignados ? g.cancelado / g.asignados : 0;
@@ -409,6 +411,7 @@
     t.pctRescate = t.asignados ? t.rescate/t.asignados : 0;
     t.pctAusente = t.asignados ? t.ausente/t.asignados : 0;
     t.pctSinFftt = t.asignados ? t.sinFftt/t.asignados : 0;
+    t.pctEnProceso = t.asignados ? t.enProceso/t.asignados : 0;
     return t;
   }
 
@@ -453,13 +456,20 @@
 
     const below = activos
       .filter(g => g.efectividad < OBJETIVO)
-      .map(g => ({...g, falta: Math.ceil(g.asignados * OBJETIVO) - g.finalizado}))
-      .sort((a, b) => a.falta - b.falta);
+      .map(g => {
+        const falta = Math.ceil(g.asignados * OBJETIVO) - g.finalizado;
+        // Las OT "en proceso" aún pueden liquidarse; si alcanzan a cubrir lo que
+        // falta, ese técnico no necesita asignación nueva, solo que cierren.
+        const faltaNeta = Math.max(falta - g.enProceso, 0);
+        return {...g, falta, faltaNeta};
+      })
+      .sort((a, b) => a.faltaNeta - b.faltaNeta || a.falta - b.falta);
 
     const totalTecnicos = activos.length;
     const enMeta = totalTecnicos - below.length;
     const pctEnMeta = totalTecnicos ? Math.round((enMeta / totalTecnicos) * 100) : 0;
     const totalFalta = below.reduce((s, g) => s + g.falta, 0);
+    const totalFaltaNeta = below.reduce((s, g) => s + g.faltaNeta, 0);
     const targetPct = Math.round(OBJETIVO * 100);
 
     if (!below.length){
@@ -475,7 +485,7 @@
         <div class="alert-top">
           <div>
             <h2>Técnicos que necesitan órdenes efectivas para llegar a la meta</h2>
-            <div class="panel-sub">${below.length} de ${totalTecnicos} técnicos por debajo de ${pct(OBJETIVO)} de efectividad · se necesitan ${totalFalta} OT efectivas adicionales en total</div>
+            <div class="panel-sub">${below.length} de ${totalTecnicos} técnicos por debajo de ${pct(OBJETIVO)} de efectividad · faltan ${totalFalta} OT efectivas en total (${totalFaltaNeta} descontando las que ya están en proceso)</div>
           </div>
           <div class="alert-ring">
             <svg width="74" height="74" viewBox="0 0 74 74">
@@ -488,7 +498,11 @@
         <div class="alert-list">
           ${below.map(g => {
             const curPct = Math.max(Math.round(g.efectividad * 100), g.efectividad > 0 ? 2 : 0);
-            const gapCls = (targetPct - curPct) > 20 ? '' : 'warn';
+            // Si lo que ya tiene "en proceso" alcanza para cubrir la brecha, no
+            // necesita una asignación nueva — solo que esas OT se liquiden.
+            const cubierto = g.enProceso > 0 && g.faltaNeta === 0;
+            const gapCls = cubierto ? 'covered' : ((targetPct - curPct) > 20 ? '' : 'warn');
+            const enProcesoNota = g.enProceso ? ` · ${g.enProceso} en proceso` : '';
             return `
             <div class="alert-item">
               <div class="name" title="${escapeHtml(g.key)}">${escapeHtml(g.key)}</div>
@@ -497,8 +511,8 @@
                 <div class="alert-target-mark" style="left:${targetPct}%"></div>
               </div>
               <div class="alert-need ${gapCls}">
-                <div class="n">Faltan ${g.falta}</div>
-                <div class="lbl">${pct(g.efectividad)} → ${pct(OBJETIVO)}</div>
+                <div class="n">${cubierto ? 'Cubierto en proceso' : 'Faltan ' + g.faltaNeta}</div>
+                <div class="lbl">${pct(g.efectividad)} → ${pct(OBJETIVO)}${enProcesoNota}</div>
               </div>
             </div>`;
           }).join('')}
@@ -520,6 +534,7 @@
     clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15.5 14"></polyline></svg>',
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><line x1="9" y1="9" x2="15" y2="15"></line><line x1="15" y1="9" x2="9" y2="15"></line></svg>',
     trend: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 6"></polyline><polyline points="15 6 21 6 21 12"></polyline></svg>',
+    activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>',
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
     userMinus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="18" y1="8" x2="23" y2="8"></line></svg>',
     wifiOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path><path d="M10.71 5.05A16 16 0 0 1 22.58 9"></path><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>'
@@ -532,6 +547,7 @@
     const cards = [
       {label:'Total Asignados', value: String(t.asignados), sub: t.asignados + ' registros', icon:'layers', accent:'#334155', accentSoft:'#F1F5F9'},
       {label:'Efectivos / Liquidados', value: String(t.finalizado), subPill: pct(t.efectividad) + ' Efectividad', icon:'check', accent:'#15803D', accentSoft:'#DCFCE7'},
+      {label:'En Proceso', value: String(t.enProceso), subPill: pct(t.pctEnProceso) + ' En Proc.', icon:'activity', accent:'#0284C7', accentSoft:'#E0F2FE'},
       {label:'Reprogramados', value: String(t.reprograma), subPill: pct(t.pctRepro) + ' Reprog.', icon:'clock', accent:'#B45309', accentSoft:'#FEF3C7'},
       {label:'Cancelados', value: String(t.cancelado), subPill: pct(t.pctCancel) + ' Canc.', icon:'x', accent:'#DC2626', accentSoft:'#FEE2E2'},
       {label:'Rescate', value: String(t.rescate), subPill: pct(t.pctRescate) + ' Rescate', icon:'alert', accent:'#6D28D9', accentSoft:'#EDE9FE'},
@@ -570,6 +586,7 @@
               <th data-key="key">${id === 'zona' ? 'ZONA' : 'TÉCNICO'}</th>
               <th data-key="asignados">ASIG.</th>
               <th data-key="finalizado">FINAL.</th>
+              <th data-key="enProceso">EN PROC.</th>
               <th data-key="cancelado">CANC.</th>
               <th data-key="reprograma">REPROG.</th>
               <th data-key="rescate">RESC.</th>
@@ -587,6 +604,7 @@
               <td>TOTAL</td>
               <td>${t.asignados}</td>
               <td>${t.finalizado}</td>
+              <td>${t.enProceso}</td>
               <td>${t.cancelado}</td>
               <td>${t.reprograma}</td>
               <td>${t.rescate}</td>
@@ -634,12 +652,13 @@
       <td title="${escapeHtml(g.key)}">${escapeHtml(g.key)}</td>
       <td>${g.asignados}</td>
       <td>${g.finalizado}</td>
+      <td class="${g.enProceso ? 'flag-proc' : ''}">${g.enProceso}</td>
       <td>${g.cancelado}</td>
       <td>${g.reprograma}</td>
       <td>${g.rescate}</td>
       <td>${g.ausente}</td>
       <td>${g.sinFftt}</td>
-      <td class="${g.enProceso ? 'flag-proc' : ''}">${g.pendiente}</td>
+      <td>${g.pendiente}</td>
       <td>${pct(g.efectividad)}</td>
       <td>${pct(g.productividad)}</td>
       <td>${indicadorHtml(g.efectividad, g.asignados, g.finalizado)}</td>
@@ -665,14 +684,14 @@
 
     const toSheetRows = (list) => {
       const tz = totals(list);
-      const header = ['GRUPO','ASIGNADOS','FINALIZADO','CANCELADO','REPROGRAMA','RESCATE','AUSENTE','SIN FFTT','PENDIENTE','EFECTIVIDAD','PRODUCTIVIDAD','% CANCELACION','% REPROGRAMACION','INDICADOR'];
+      const header = ['GRUPO','ASIGNADOS','FINALIZADO','EN PROCESO','CANCELADO','REPROGRAMA','RESCATE','AUSENTE','SIN FFTT','PENDIENTE','EFECTIVIDAD','PRODUCTIVIDAD','% CANCELACION','% REPROGRAMACION','INDICADOR'];
       const rows = list.sort((a,b)=> a.key.localeCompare(b.key)).map(g => [
-        g.key, g.asignados, g.finalizado, g.cancelado, g.reprograma, g.rescate, g.ausente, g.sinFftt, g.pendiente,
+        g.key, g.asignados, g.finalizado, g.enProceso, g.cancelado, g.reprograma, g.rescate, g.ausente, g.sinFftt, g.pendiente,
         +(g.efectividad*100).toFixed(1)+'%', +(g.productividad*100).toFixed(1)+'%',
         +(g.pctCancel*100).toFixed(1)+'%', +(g.pctRepro*100).toFixed(1)+'%',
         g.efectividad >= OBJETIVO ? 'OK' : ('Falta ' + (Math.ceil(g.asignados*OBJETIVO)-g.finalizado))
       ]);
-      rows.push(['TOTAL', tz.asignados, tz.finalizado, tz.cancelado, tz.reprograma, tz.rescate, tz.ausente, tz.sinFftt, tz.pendiente,
+      rows.push(['TOTAL', tz.asignados, tz.finalizado, tz.enProceso, tz.cancelado, tz.reprograma, tz.rescate, tz.ausente, tz.sinFftt, tz.pendiente,
         +(tz.efectividad*100).toFixed(1)+'%', +(tz.productividad*100).toFixed(1)+'%',
         +(tz.pctCancel*100).toFixed(1)+'%', +(tz.pctRepro*100).toFixed(1)+'%',
         tz.efectividad >= OBJETIVO ? 'OK' : ('Falta ' + (Math.ceil(tz.asignados*OBJETIVO)-tz.finalizado))]);
